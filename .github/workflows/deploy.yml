@@ -12,69 +12,181 @@ env:
   BACKEND_B_PATH: ./backend-b
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        environment: [dev, qa, prod]
         backend: [backend-a, backend-b]
 
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Set environment variables
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build image version
       run: |
-        if [ "${{ matrix.environment }}" == "dev" ]; then
-          echo "ACR_NAME=gopaldevacr" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=rg-gopal-dev" >> $GITHUB_ENV
-          echo "AKS_CLUSTER=aks-gopal-dev" >> $GITHUB_ENV
-        elif [ "${{ matrix.environment }}" == "qa" ]; then
-          echo "ACR_NAME=gopalqaacr" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=rg-gopal-qa" >> $GITHUB_ENV
-          echo "AKS_CLUSTER=aks-gopal-qa" >> $GITHUB_ENV
-        else
-          echo "ACR_NAME=gopalprodacr" >> $GITHUB_ENV
-          echo "RESOURCE_GROUP=rg-gopal-prod" >> $GITHUB_ENV
-          echo "AKS_CLUSTER=aks-gopal-prod" >> $GITHUB_ENV
-        fi
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "IMAGE_TAG=dev-${SHORT_SHA}" >> $GITHUB_ENV
+
+    - name: Build and push to Dev ACR
+      run: |
+        cd ${{ matrix.backend }}
+        az acr build \
+          --registry gopaldevacr \
+          --image ${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
+          --image ${{ matrix.backend }}:dev-latest \
+          --file Dockerfile \
+          .
+
+  deploy-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev
+    strategy:
+      matrix:
+        backend: [backend-a, backend-b]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
 
     - name: Azure Login
       uses: azure/login@v1
       with:
         creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-    - name: Get ACR login server
-      run: |
-        ACR_LOGIN_SERVER=$(az acr show --name ${{ env.ACR_NAME }} --query loginServer --output tsv)
-        echo "ACR_LOGIN_SERVER=$ACR_LOGIN_SERVER" >> $GITHUB_ENV
-
     - name: Build image version
       run: |
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-        echo "IMAGE_TAG=${{ matrix.environment }}-${SHORT_SHA}" >> $GITHUB_ENV
-
-    - name: Build and push Docker image to ACR
-      run: |
-        cd ${{ matrix.backend }}
-        az acr build \
-          --registry ${{ env.ACR_NAME }} \
-          --image ${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
-          --image ${{ matrix.backend }}:${{ matrix.environment }}-latest \
-          --file Dockerfile \
-          .
+        echo "IMAGE_TAG=dev-${SHORT_SHA}" >> $GITHUB_ENV
 
     - name: Get AKS credentials
       run: |
         az aks get-credentials \
-          --resource-group ${{ env.RESOURCE_GROUP }} \
-          --name ${{ env.AKS_CLUSTER }} \
+          --resource-group rg-gopal-dev \
+          --name aks-gopal-dev \
           --overwrite-existing
 
-    - name: Deploy to AKS
+    - name: Deploy to Dev AKS
       run: |
         kubectl set image deployment/${{ matrix.backend }} \
-          ${{ matrix.backend }}=${{ env.ACR_LOGIN_SERVER }}/${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
+          ${{ matrix.backend }}=gopaldevacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
+          -n gopal-app
+
+    - name: Wait for rollout
+      run: |
+        kubectl rollout status deployment/${{ matrix.backend }} -n gopal-app --timeout=5m
+
+    - name: Verify deployment
+      run: |
+        kubectl get pods -n gopal-app -l app=${{ matrix.backend }}
+
+  promote-to-qa:
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    environment: qa
+    strategy:
+      matrix:
+        backend: [backend-a, backend-b]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build image version
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "IMAGE_TAG=qa-${SHORT_SHA}" >> $GITHUB_ENV
+
+    - name: Promote image to QA ACR
+      run: |
+        # Pull from dev
+        az acr login --name gopaldevacr
+        docker pull gopaldevacr.azurecr.io/${{ matrix.backend }}:dev-latest
+
+        # Tag and push to QA
+        az acr login --name gopalqaacr
+        docker tag gopaldevacr.azurecr.io/${{ matrix.backend }}:dev-latest gopalqaacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }}
+        docker tag gopaldevacr.azurecr.io/${{ matrix.backend }}:dev-latest gopalqaacr.azurecr.io/${{ matrix.backend }}:qa-latest
+        docker push gopalqaacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }}
+        docker push gopalqaacr.azurecr.io/${{ matrix.backend }}:qa-latest
+
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials \
+          --resource-group rg-gopal-qa \
+          --name aks-gopal-qa \
+          --overwrite-existing
+
+    - name: Deploy to QA AKS
+      run: |
+        kubectl set image deployment/${{ matrix.backend }} \
+          ${{ matrix.backend }}=gopalqaacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
+          -n gopal-app
+
+    - name: Wait for rollout
+      run: |
+        kubectl rollout status deployment/${{ matrix.backend }} -n gopal-app --timeout=5m
+
+    - name: Verify deployment
+      run: |
+        kubectl get pods -n gopal-app -l app=${{ matrix.backend }}
+
+  promote-to-prod:
+    needs: promote-to-qa
+    runs-on: ubuntu-latest
+    environment: prod
+    strategy:
+      matrix:
+        backend: [backend-a, backend-b]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Build image version
+      run: |
+        SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
+        echo "IMAGE_TAG=prod-${SHORT_SHA}" >> $GITHUB_ENV
+
+    - name: Promote image to Prod ACR
+      run: |
+        # Pull from QA
+        az acr login --name gopalqaacr
+        docker pull gopalqaacr.azurecr.io/${{ matrix.backend }}:qa-latest
+
+        # Tag and push to Prod
+        az acr login --name gopalprodacr
+        docker tag gopalqaacr.azurecr.io/${{ matrix.backend }}:qa-latest gopalprodacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }}
+        docker tag gopalqaacr.azurecr.io/${{ matrix.backend }}:qa-latest gopalprodacr.azurecr.io/${{ matrix.backend }}:prod-latest
+        docker push gopalprodacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }}
+        docker push gopalprodacr.azurecr.io/${{ matrix.backend }}:prod-latest
+
+    - name: Get AKS credentials
+      run: |
+        az aks get-credentials \
+          --resource-group rg-gopal-prod \
+          --name aks-gopal-prod \
+          --overwrite-existing
+
+    - name: Deploy to Prod AKS
+      run: |
+        kubectl set image deployment/${{ matrix.backend }} \
+          ${{ matrix.backend }}=gopalprodacr.azurecr.io/${{ matrix.backend }}:${{ env.IMAGE_TAG }} \
           -n gopal-app
 
     - name: Wait for rollout
