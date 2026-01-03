@@ -30,9 +30,30 @@ app.use((req, res, next) => {
   next();
 });
 
+// Root endpoint
+app.get("/", (req, res) => {
+  res.json({
+    backend: BACKEND,
+    message: "Backend service is running",
+    endpoints: {
+      health: "/health",
+      api: "/api/a (POST for data submission)"
+    }
+  });
+});
+
 // Health check endpoint
 app.get("/health", (req, res) => {
   res.json({ status: "ok", backend: BACKEND, port: PORT });
+});
+
+// GET endpoint for browser testing
+app.get("/api/a", (req, res) => {
+  res.json({
+    backend: BACKEND,
+    message: "Use POST to submit data",
+    endpoint: "/api/a"
+  });
 });
 
 // Image upload endpoint
