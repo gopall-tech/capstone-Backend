@@ -1,0 +1,82 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gopal-api-gateway-nginx
+  namespace: gopal-app-dev
+data:
+  default.conf: |-
+    server {
+      listen 80;
+      server_name _;
+
+      location /healthz {
+        return 200 "ok";
+      }
+
+      location /api/a {
+        proxy_pass         http://backend-a-service:8080/api/a;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+      }
+
+      location /api/b {
+        proxy_pass         http://backend-b-service:8080/api/b;
+        proxy_http_version 1.1;
+        proxy_set_header   Host              $host;
+        proxy_set_header   X-Real-IP         $remote_addr;
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+      }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gopal-api-gateway
+  namespace: gopal-app-dev
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gopal-api-gateway
+  template:
+    metadata:
+      labels:
+        app: gopal-api-gateway
+        tier: frontend
+    spec:
+      containers:
+      - name: nginx
+        image: nginx:1.25-alpine
+        ports:
+        - containerPort: 80
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/conf.d
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: gopal-api-gateway-nginx
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gopal-api-gateway
+  namespace: gopal-app-dev
+spec:
+  type: LoadBalancer
+  selector:
+    app: gopal-api-gateway
+  ports:
+  - port: 80
+    targetPort: 80

@@ -1,0 +1,61 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gopal-backend-b
+  namespace: gopal-app-qa
+  labels:
+    app: gopal-backend-b
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: gopal-backend-b
+  template:
+    metadata:
+      labels:
+        app: gopal-backend-b
+        tier: backend
+    spec:
+      containers:
+      - name: backend-b
+        image: gopalqaacr.azurecr.io/backend-b:dev
+        ports:
+        - containerPort: 8080
+        envFrom:
+        - configMapRef:
+            name: gopal-db-config
+        - secretRef:
+            name: gopal-db-credentials
+        resources:
+          requests:
+            cpu: 50m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-b-service
+  namespace: gopal-app-qa
+spec:
+  type: ClusterIP
+  selector:
+    app: gopal-backend-b
+  ports:
+  - port: 8080
+    targetPort: 8080
