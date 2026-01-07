@@ -22,6 +22,19 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: SonarCloud Scan
+      uses: SonarSource/sonarcloud-github-action@master
+      continue-on-error: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+      with:
+        projectBaseDir: ${{ matrix.backend }}
+        args: >
+          -Dsonar.projectKey=capstone-${{ matrix.backend }}
+          -Dsonar.sources=.
+          -Dsonar.exclusions=node_modules/**,coverage/**
+
     - name: Azure Login
       uses: azure/login@v1
       with:
@@ -31,6 +44,7 @@ jobs:
       run: |
         SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
         echo "IMAGE_TAG=dev-${SHORT_SHA}" >> $GITHUB_ENV
+        echo "ACR_LOGIN_SERVER=gopaldevacr.azurecr.io" >> $GITHUB_ENV
 
     - name: Build and push to Dev ACR
       run: |
@@ -41,6 +55,30 @@ jobs:
           --image ${{ matrix.backend }}:dev-latest \
           --file Dockerfile \
           .
+
+    - name: Run Trivy vulnerability scanner
+      uses: aquasecurity/trivy-action@master
+      continue-on-error: true
+      with:
+        image-ref: ${{ env.ACR_LOGIN_SERVER }}/${{ matrix.backend }}:${{ env.IMAGE_TAG }}
+        format: 'sarif'
+        output: 'trivy-${{ matrix.backend }}.sarif'
+        severity: 'HIGH,CRITICAL'
+
+    - name: Upload Trivy scan results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      continue-on-error: true
+      with:
+        sarif_file: 'trivy-${{ matrix.backend }}.sarif'
+        category: 'trivy-${{ matrix.backend }}'
+
+    - name: Upload Trivy reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: trivy-${{ matrix.backend }}-report
+        path: 'trivy-${{ matrix.backend }}.sarif'
+        retention-days: 30
 
   deploy-dev:
     needs: build
